@@ -2,7 +2,7 @@
   "modelVersion": "6.1.1",
   "description": "Please describe the basic information.",
   "dependencies": {
-    "@arkui-genius/genui": "0.7.0-alpha.4"
+    "@arkui-genius/genui": "0.7.0-alpha.6"
   },
   "devDependencies": {
     "@ohos/hypium": "1.0.25",

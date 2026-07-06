@@ -3,7 +3,8 @@ import { util } from '@kit.ArkTS'
 import { image } from '@kit.ImageKit'
 import fs from '@ohos.file.fs'
 import window from '@ohos.window'
-import { Catalog, SurfaceController, SurfaceEventType, UIRendererComponent } from '@arkui-genius/genui'
+import { Catalog, SurfaceController, SurfaceEventType, UIRendererComponent, SurfaceControllerFactory,
+  CatalogFactory } from '@arkui-genius/genui'
 
 const CASE_INPUT_DIR: string = 'a2ui_cases'
 const SHOT_OUTPUT_DIR: string = 'a2ui-render-shots'
@@ -121,7 +122,7 @@ struct Index {
       await this.sleep(CASE_GAP_DELAY_MS)
 
       for (const message of messages) {
-        this.controller?.onReceive(message)
+        this.controller?.handleMessage(message)
         await this.sleep(MESSAGE_FEED_DELAY_MS)
       }
 
@@ -145,7 +146,8 @@ struct Index {
     const callback = (eventType: SurfaceEventType, _ctrl: SurfaceController) => {
       console.info(`A2UI surface event: ${eventType}`)
     }
-    const controller = new SurfaceController(Catalog.extended(), callback)
+    // const controller = new SurfaceController(Catalog.extended(), callback)
+    const controller = SurfaceControllerFactory.createSurfaceController({uiContext: this.getUIContext(), catalog: CatalogFactory.extended(), eventCallback: callback})
     controller.registerActionReceiver((action: string) => {
       console.info(`Action received: ${action}`)
     })
@@ -284,11 +286,11 @@ struct Index {
     Column() {
       if (this.captureMode) {
         if (this.controller !== null) {
-          UIRendererComponent({ surfaceControllerBound: this.controller })
+          UIRendererComponent({ surfaceController: this.controller })
         }
       } else {
         if (this.controller !== null) {
-          UIRendererComponent({ surfaceControllerBound: this.controller })
+          UIRendererComponent({ surfaceController: this.controller })
         }
 
         Column({ space: 8 }) {
