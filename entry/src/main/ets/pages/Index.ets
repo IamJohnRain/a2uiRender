@@ -11,6 +11,8 @@ const SHOT_OUTPUT_DIR: string = 'a2ui-render-shots'
 const RENDER_STABLE_DELAY_MS: number = 1000
 const CASE_GAP_DELAY_MS: number = 120
 const MESSAGE_FEED_DELAY_MS: number = 120
+const SURFACE_TOP_VP: number = 39
+const CROP_PADDING_VP: number = 0
 
 interface RenderCase {
   name: string
@@ -22,6 +24,16 @@ interface RenderResult {
   outputPath: string
   success: boolean
   error: string
+}
+
+interface SurfaceSize {
+  width: number
+  height: number
+}
+
+interface RenderPayload {
+  messages: string[]
+  surfaceSize: SurfaceSize | null
 }
 
 @Entry
@@ -111,8 +123,8 @@ struct Index {
     const outputPath = `${this.outputDir}/${this.toSafeBaseName(item.name)}.png`
 
     try {
-      const messages = this.loadMessages(context, item.rawfilePath)
-      if (messages.length === 0) {
+      const payload = this.loadRenderPayload(context, item.rawfilePath)
+      if (payload.messages.length === 0) {
         return this.failedResult(item.name, outputPath, 'No render messages parsed')
       }
 
@@ -121,13 +133,13 @@ struct Index {
       this.controller = this.createController()
       await this.sleep(CASE_GAP_DELAY_MS)
 
-      for (const message of messages) {
+      for (const message of payload.messages) {
         this.controller?.handleMessage(message)
         await this.sleep(MESSAGE_FEED_DELAY_MS)
       }
 
       await this.sleep(RENDER_STABLE_DELAY_MS)
-      await this.captureRender(outputPath)
+      await this.captureRender(outputPath, payload.surfaceSize)
       console.info(`Saved A2UI screenshot: ${outputPath}`)
 
       return {
@@ -159,7 +171,7 @@ struct Index {
     this.controller = null
   }
 
-  private loadMessages(context: common.Context, rawfilePath: string): string[] {
+  private loadRenderPayload(context: common.Context, rawfilePath: string): RenderPayload {
     const fileData = context.resourceManager.getRawFileContentSync(rawfilePath)
     const decoderOptions: util.TextDecoderOptions = {
       fatal: false,
@@ -172,9 +184,13 @@ struct Index {
     const jsonText = textDecoder.decodeToString(fileData, decodeOptions)
     const trimmedText = jsonText.trim()
     if (trimmedText.length === 0) {
-      return []
+      return {
+        messages: [],
+        surfaceSize: null
+      }
     }
 
+    const parsedMessages: Object[] = []
     if (trimmedText.startsWith('[')) {
       let parsed: Object[] | string[] = []
       try {
@@ -184,15 +200,27 @@ struct Index {
       }
 
       if (!Array.isArray(parsed)) {
-        return []
+        return {
+          messages: [],
+          surfaceSize: null
+        }
       }
 
-      return parsed.map((message: Object | string): string => {
+      const messages = parsed.map((message: Object | string): string => {
         if (typeof message === 'string') {
+          const parsedMessage = this.parseMessageObject(message)
+          if (parsedMessage !== null) {
+            parsedMessages.push(parsedMessage)
+          }
           return message
         }
+        parsedMessages.push(message)
         return JSON.stringify(message)
       })
+      return {
+        messages: messages,
+        surfaceSize: this.resolveSurfaceSize(parsedMessages)
+      }
     }
 
     const messages: string[] = []
@@ -204,17 +232,72 @@ struct Index {
       }
 
       try {
-        JSON.parse(line)
+        const parsedMessage = JSON.parse(line) as Object
+        parsedMessages.push(parsedMessage)
       } catch (error) {
         throw new Error(`Invalid JSONL line ${index + 1} in ${rawfilePath}: ${error}`)
       }
 
       messages.push(line)
     }
-    return messages
+    return {
+      messages: messages,
+      surfaceSize: this.resolveSurfaceSize(parsedMessages)
+    }
   }
 
-  private async captureRender(outputPath: string): Promise<void> {
+  private parseMessageObject(message: string): Object | null {
+    try {
+      return JSON.parse(message) as Object
+    } catch (_error) {
+      return null
+    }
+  }
+
+  private resolveSurfaceSize(messages: Object[]): SurfaceSize | null {
+    for (const message of messages) {
+      const record = this.asRecord(message)
+      if (record === null) {
+        continue
+      }
+
+      const createSurface = this.asRecord(record['createSurface'])
+      if (createSurface === null) {
+        continue
+      }
+
+      const width = this.asPositiveNumber(createSurface['width'])
+      const height = this.asPositiveNumber(createSurface['height'])
+      if (width !== null && height !== null) {
+        return {
+          width: width,
+          height: height
+        }
+      }
+    }
+    return null
+  }
+
+  private asRecord(value: Object | undefined): Record<string, Object> | null {
+    if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null
+    }
+    return value as Record<string, Object>
+  }
+
+  private asPositiveNumber(value: Object | undefined): number | null {
+    if (value === undefined || value === null) {
+      return null
+    }
+
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null
+    }
+    return parsed
+  }
+
+  private async captureRender(outputPath: string, surfaceSize: SurfaceSize | null): Promise<void> {
     const context = this.context
     if (context === null) {
       throw new Error('Host context unavailable')
@@ -223,6 +306,7 @@ struct Index {
     this.ensureOutputDir(this.outputDir)
     const mainWindow = await window.getLastWindow(context)
     const pixelMap = await mainWindow.snapshot()
+    this.cropToSurfaceSize(pixelMap, surfaceSize)
     const packer = image.createImagePacker()
     const options: image.PackingOption = {
       format: 'image/png',
@@ -241,6 +325,38 @@ struct Index {
       pixelMap.release()
       packer.release()
     }
+  }
+
+  private cropToSurfaceSize(pixelMap: image.PixelMap, surfaceSize: SurfaceSize | null): void {
+    if (surfaceSize === null) {
+      return
+    }
+
+    const imageInfo = pixelMap.getImageInfoSync()
+    const paddingPx = Math.round(this.getUIContext().vp2px(CROP_PADDING_VP))
+    const cropWidth = Math.round(this.getUIContext().vp2px(surfaceSize.width)) + paddingPx * 2
+    const cropHeight = Math.round(this.getUIContext().vp2px(surfaceSize.height)) + paddingPx * 2
+    if (cropWidth <= 0 || cropHeight <= 0) {
+      return
+    }
+
+    const cropLeft = Math.max(0, Math.floor((imageInfo.size.width - cropWidth) / 2))
+    const cropTop = Math.max(0, Math.round(this.getUIContext().vp2px(SURFACE_TOP_VP)) - paddingPx)
+    const boundedWidth = Math.min(cropWidth, imageInfo.size.width - cropLeft)
+    const boundedHeight = Math.min(cropHeight, imageInfo.size.height - cropTop)
+    if (boundedWidth <= 0 || boundedHeight <= 0) {
+      return
+    }
+
+    const cropRegion: image.Region = {
+      x: cropLeft,
+      y: cropTop,
+      size: {
+        width: boundedWidth,
+        height: boundedHeight
+      }
+    }
+    pixelMap.cropSync(cropRegion)
   }
 
   private ensureOutputDir(path: string): void {
